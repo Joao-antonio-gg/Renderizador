@@ -253,12 +253,11 @@ class GL:
 
 
 
-    @staticmethod
-    def triangleSet(point, colors):
-        """Desenha triângulos aplicando transformações acumuladas e z-buffer global."""
-        rgb = [int(c*255) for c in colors.get("emissiveColor", [1.0, 1.0, 1.0])]
-        w, h = GL.width, GL.height
 
+    @staticmethod
+    def triangleSet(point, colors, vertex_colors=None, vertex_uvs=None, texture=None):
+        """Desenha triângulos 3D com interpolação perspectiva de cor e textura."""
+        w, h = GL.width, GL.height
         if not hasattr(GL, 'z_buffer'):
             GL.z_buffer = np.full((h, w), GL.far, dtype=float)
 
@@ -273,101 +272,171 @@ class GL:
             sx = int((vec[0]+1)*w/2)
             sy = int((1-vec[1])*h/2)
             sz = (vec[2]+1)/2
-            return [sx, sy, sz]
+            return [sx, sy, sz, 1.0/vec[3] if vec[3] != 0 else 1.0]
 
-        def safe_draw_pixel(x, y, z):
+        def barycentric_coords(px, py, v0, v1, v2):
+            x0, y0 = v0[0], v0[1]
+            x1, y1 = v1[0], v1[1]
+            x2, y2 = v2[0], v2[1]
+            denom = (y1 - y2)*(x0 - x2) + (x2 - x1)*(y0 - y2)
+            if denom == 0:
+                return 0,0,0
+            w0 = ((y1 - y2)*(px - x2) + (x2 - x1)*(py - y2)) / denom
+            w1 = ((y2 - y0)*(px - x2) + (x0 - x2)*(py - y2)) / denom
+            w2 = 1 - w0 - w1
+            return w0, w1, w2
+
+        def safe_draw_pixel(x, y, z, color):
             if 0 <= x < w and 0 <= y < h:
                 if z < GL.z_buffer[y, x]:
-                    gpu.GPU.draw_pixel([x, y], gpu.GPU.RGB8, rgb)
+                    gpu.GPU.draw_pixel([x, y], gpu.GPU.RGB8, color)
                     GL.z_buffer[y, x] = z
 
-        def fill_triangle(v0, v1, v2):
-            verts = sorted([v0, v1, v2], key=lambda v: v[1])
-            x0, y0, z0 = verts[0]
-            x1, y1, z1 = verts[1]
-            x2, y2, z2 = verts[2]
-
-            def edge_interp(y, y0, x0, y1, x1):
-                if y1==y0: return x0
-                return x0 + (x1-x0)*(y-y0)/(y1-y0)
-            def z_interp(y, y0, z0, y1, z1):
-                if y1==y0: return z0
-                return z0 + (z1-z0)*(y-y0)/(y1-y0)
-
-            for y in range(y0, y2+1):
-                if y < y1:
-                    xa = edge_interp(y, y0, x0, y1, x1)
-                    xb = edge_interp(y, y0, x0, y2, x2)
-                    za = z_interp(y, y0, z0, y1, z1)
-                    zb = z_interp(y, y0, z0, y2, z2)
+        def sample_texture(u, v, texture, flip_v=True, flip_u=False):
+            if texture is None:
+                return None
+            import numpy as np
+            from renderizador import gpu
+            # Se for lista (ex: ['insper.png']), carrega a textura
+            if isinstance(texture, list):
+                if len(texture) > 0 and isinstance(texture[0], str):
+                    texture = gpu.GPU.load_texture(texture[0].strip('" '))
                 else:
-                    xa = edge_interp(y, y1, x1, y2, x2)
-                    xb = edge_interp(y, y0, x0, y2, x2)
-                    za = z_interp(y, y1, z1, y2, z2)
-                    zb = z_interp(y, y0, z0, y2, z2)
-                if xa > xb:
-                    xa, xb = xb, xa
-                    za, zb = zb, za
-                for x in range(int(xa), int(xb)+1):
-                    z = za + (zb-za)*(x-xa)/(xb-xa) if xb!=xa else za
-                    safe_draw_pixel(x, y, z)
+                    return None
+            if not hasattr(texture, 'shape') or len(texture.shape) < 2:
+                return None
+            h, w = texture.shape[0], texture.shape[1]
+            # Clamp UV
+            u = max(0, min(1, u))
+            v = max(0, min(1, v))
+            if flip_u:
+                u = 1 - u
+            if flip_v:
+                v = 1 - v
+            x = int(u * (w-1))
+            y = int(v * (h-1))
+            color = texture[y, x]
+            if hasattr(color, '__len__') and len(color) == 4:
+                # Retorna RGBA
+                return color.tolist() if hasattr(color, 'tolist') else list(color)
+            return color.tolist() if hasattr(color, 'tolist') else list(color)
 
-        # Cada 9 pontos forma um triângulo
+        def fill_triangle(v0, v1, v2, c0, c1, c2, uv0, uv1, uv2):
+            minx, maxx = max(0, min(v0[0], v1[0], v2[0])), min(w-1, max(v0[0], v1[0], v2[0]))
+            miny, maxy = max(0, min(v0[1], v1[1], v2[1])), min(h-1, max(v0[1], v1[1], v2[1]))
+            for y in range(miny, maxy+1):
+                for x in range(minx, maxx+1):
+                    w0, w1, w2 = barycentric_coords(x, y, v0, v1, v2)
+                    if w0 >= 0 and w1 >= 0 and w2 >= 0:
+                        z0, z1, z2 = v0[2], v1[2], v2[2]
+                        inv_w0, inv_w1, inv_w2 = v0[3], v1[3], v2[3]
+                        inv_w = w0*inv_w0 + w1*inv_w1 + w2*inv_w2
+                        if inv_w == 0:
+                            continue
+                        w0p = (w0*inv_w0) / inv_w
+                        w1p = (w1*inv_w1) / inv_w
+                        w2p = (w2*inv_w2) / inv_w
+                        # Interpola cor
+                        if c0 is not None and c1 is not None and c2 is not None:
+                            color = [int(w0p*c0[i] + w1p*c1[i] + w2p*c2[i]) for i in range(3)]
+                        else:
+                            color = [int(c*255) for c in colors.get("emissiveColor", [1,1,1])]
+                        # Interpola UV
+                        if uv0 is not None and uv1 is not None and uv2 is not None and texture is not None:
+                            u = w0p*uv0[0] + w1p*uv1[0] + w2p*uv2[0]
+                            v_ = w0p*uv0[1] + w1p*uv1[1] + w2p*uv2[1]
+                            tex_color = sample_texture(u, v_, texture, flip_v=True, flip_u=False)
+                            if tex_color is not None:
+                                # Suporte a alpha blending se RGBA
+                                if len(tex_color) == 4:
+                                    alpha = tex_color[3] / 255.0
+                                    if alpha < 1.0:
+                                        from renderizador import gpu
+                                        try:
+                                            bg = gpu.GPU.read_pixel([x, y], gpu.GPU.RGB8)
+                                        except Exception:
+                                            bg = [0, 0, 0]
+                                        color = [
+                                            int(tex_color[i]*alpha + bg[i]*(1-alpha)) for i in range(3)
+                                        ]
+                                    else:
+                                        color = tex_color[:3]
+                                else:
+                                    color = tex_color[:3]
+                        # Se não usou textura RGBA, aplica transparência do material/cor base
+                        if 'transparency' in colors and colors['transparency'] > 0.0:
+                            alpha = 1.0 - colors['transparency']
+                            if alpha < 1.0:
+                                from renderizador import gpu
+                                try:
+                                    bg = gpu.GPU.read_pixel([x, y], gpu.GPU.RGB8)
+                                except Exception:
+                                    bg = [0, 0, 0]
+                                color = [
+                                    int(color[i]*alpha + bg[i]*(1-alpha)) for i in range(3)
+                                ]
+                        z = w0p*z0 + w1p*z1 + w2p*z2
+                        safe_draw_pixel(x, y, z, color)
+
+        n = len(point) // 3
         for i in range(0, len(point), 9):
             v0 = project_vertex(point[i:i+3])
             v1 = project_vertex(point[i+3:i+6])
             v2 = project_vertex(point[i+6:i+9])
-            fill_triangle(v0, v1, v2)
+            if vertex_colors:
+                c0, c1, c2 = vertex_colors
+            else:
+                c0 = c1 = c2 = None
+            if vertex_uvs:
+                uv0, uv1, uv2 = vertex_uvs
+            else:
+                uv0 = uv1 = uv2 = None
+            fill_triangle(v0, v1, v2, c0, c1, c2, uv0, uv1, uv2)
 
 
     @staticmethod
     def viewpoint(position, orientation, fieldOfView):
-        """
-        Define os parâmetros da câmera (viewpoint) e cria a matriz de projeção perspectiva.
-
-        position: [x, y, z] posição da câmera no mundo
-        orientation: [ax, ay, az, angle] rotação da câmera em torno do eixo (ax, ay, az) por 'angle' radianos
-        fieldOfView: ângulo vertical em radianos
-        """
-        # Salva posição e orientação da câmera
+        """Configura a câmera e a matriz de projeção."""
+        
         GL.camera_position = np.array(position, dtype=float)
         GL.camera_orientation = np.array(orientation, dtype=float)
         GL.fov = fieldOfView
 
-        # Razão de aspecto da tela
+        # Projeção perspectiva
         aspect = GL.width / GL.height
         near = GL.near
         far = GL.far
-        f = 1 / math.tan(fieldOfView / 2)  # fator focal
+        f = 1 / math.tan(fieldOfView / 2)
 
-        # Matriz de projeção perspectiva 4x4
         GL.projection_matrix = np.array([
             [f / aspect, 0, 0, 0],
             [0, f, 0, 0],
-            [0, 0, (far + near) / (near - far), (2 * far * near) / (near - far)],
+            [0, 0, (far + near)/(near - far), (2*far*near)/(near - far)],
             [0, 0, -1, 0]
         ], dtype=float)
 
-        # Matriz de visão (view matrix)
-        # Convertendo orientação de eixo + ângulo para matriz de rotação
+        # Orientação da câmera: eixo e ângulo
         ax, ay, az, angle = orientation
         c = math.cos(angle)
         s = math.sin(angle)
         t = 1 - c
+
+        # Matriz de rotação (Rodrigues)
         R = np.array([
             [t*ax*ax + c,     t*ax*ay - s*az, t*ax*az + s*ay],
             [t*ax*ay + s*az, t*ay*ay + c,     t*ay*az - s*ax],
             [t*ax*az - s*ay, t*ay*az + s*ax, t*az*az + c]
         ], dtype=float)
 
-        # Translacao inversa da camera
-        T = np.eye(4)
-        T[0:3, 3] = -GL.camera_position
+        # Matriz de translação
+        T = np.identity(4)
+        T[:3, 3] = -GL.camera_position
 
-        # View matrix 4x4
-        GL.view_matrix = np.eye(4)
-        GL.view_matrix[0:3, 0:3] = R.T  # transposta da rotação
+        # Matriz de visualização completa
+        GL.view_matrix = np.identity(4)
+        GL.view_matrix[:3, :3] = R.T  # Transposta da rotação
         GL.view_matrix = GL.view_matrix @ T
+
 
 
     @staticmethod
@@ -521,43 +590,101 @@ class GL:
 
     @staticmethod
     def indexedFaceSet(coord, coordIndex, colorPerVertex, color, colorIndex,
-                       texCoord, texCoordIndex, colors, current_texture):
-        """Função usada para renderizar IndexedFaceSet."""
-        # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/geometry3D.html#IndexedFaceSet
-        # A função indexedFaceSet é usada para desenhar malhas de triângulos. Ela funciona de
-        # forma muito simular a IndexedTriangleStripSet porém com mais recursos.
-        # Você receberá as coordenadas dos pontos no parâmetro cord, esses
-        # pontos são uma lista de pontos x, y, e z sempre na ordem. Assim coord[0] é o valor
-        # da coordenada x do primeiro ponto, coord[1] o valor y do primeiro ponto, coord[2]
-        # o valor z da coordenada z do primeiro ponto. Já coord[3] é a coordenada x do
-        # segundo ponto e assim por diante. No IndexedFaceSet uma lista de vértices é informada
-        # em coordIndex, o valor -1 indica que a lista acabou.
-        # A ordem de conexão não possui uma ordem oficial, mas em geral se o primeiro ponto com os dois
-        # seguintes e depois este mesmo primeiro ponto com o terçeiro e quarto ponto. Por exemplo: numa
-        # sequencia 0, 1, 2, 3, 4, -1 o primeiro triângulo será com os vértices 0, 1 e 2, depois serão
-        # os vértices 0, 2 e 3, e depois 0, 3 e 4, e assim por diante, até chegar no final da lista.
-        # Adicionalmente essa implementação do IndexedFace aceita cores por vértices, assim
-        # se a flag colorPerVertex estiver habilitada, os vértices também possuirão cores
-        # que servem para definir a cor interna dos poligonos, para isso faça um cálculo
-        # baricêntrico de que cor deverá ter aquela posição. Da mesma forma se pode definir uma
-        # textura para o poligono, para isso, use as coordenadas de textura e depois aplique a
-        # cor da textura conforme a posição do mapeamento. Dentro da classe GPU já está
-        # implementadado um método para a leitura de imagens.
+                    texCoord, texCoordIndex, colors, current_texture):
+        """Renderiza um IndexedFaceSet usando triangleSet da GPU, com suporte a interpolação de cor por vértice."""
+
+        def normalize_color(col):
+            if col is None:
+                return [1.0, 1.0, 1.0]
+            col = list(col)
+            if len(col) >= 3:
+                col = col[:3]
+            else:
+                while len(col) < 3:
+                    col.append(1.0)
+            mx = max(col)
+            if mx <= 1.0:
+                return [max(0.0, min(1.0, float(c))) for c in col]
+            return [max(0.0, min(1.0, float(c) / 255.0)) for c in col]
+
+        def get_color_for_index(idx):
+            if colorPerVertex:
+                if isinstance(color, (list, tuple)) and len(color) >= (idx + 1) * 3:
+                    return normalize_color(color[idx * 3: idx * 3 + 3])
+                if isinstance(colorIndex, (list, tuple)) and isinstance(color, (list, tuple)):
+                    if idx < len(colorIndex):
+                        ci = colorIndex[idx]
+                        if ci >= 0 and len(color) >= (ci + 1) * 3:
+                            return normalize_color(color[ci * 3: ci * 3 + 3])
+            if isinstance(color, (list, tuple)) and len(color) >= 3:
+                return normalize_color(color)
+            if isinstance(colors, dict):
+                return normalize_color(colors.get("emissiveColor", [1.0, 1.0, 1.0]))
+            return [1.0, 1.0, 1.0]
+
+        def get_uv_for_triangle(poly_start, tri_indices):
+            # poly_start: início do polígono atual em texCoordIndex
+            # tri_indices: lista de 3 índices (posição dos vértices do triângulo dentro do polígono)
+            if texCoord is None:
+                return [None, None, None]
+            if texCoordIndex and isinstance(texCoordIndex, (list, tuple)):
+                uvs = []
+                for pos in tri_indices:
+                    uv_idx = texCoordIndex[poly_start + pos] if (poly_start + pos) < len(texCoordIndex) else None
+                    if uv_idx is not None and uv_idx >= 0 and len(texCoord) >= (uv_idx + 1) * 2:
+                        uvs.append([texCoord[uv_idx * 2], texCoord[uv_idx * 2 + 1]])
+                    else:
+                        uvs.append(None)
+                return uvs
+            # Caso contrário, use o mesmo índice de coordIndex
+            uvs = []
+            for idx in tri_indices:
+                v_idx = idx
+                if v_idx is not None and len(texCoord) >= (v_idx + 1) * 2:
+                    uvs.append([texCoord[v_idx * 2], texCoord[v_idx * 2 + 1]])
+                else:
+                    uvs.append(None)
+            return uvs
 
         face = []
+        poly_start_tc = 0  # início do polígono atual em texCoordIndex
         for idx in coordIndex:
             if idx == -1:
-                # triangula a face atual (fan a partir do primeiro vértice)
-                for i in range(1, len(face) - 1):
-                    v1 = coord[face[0] * 3:face[0] * 3 + 3]
-                    v2 = coord[face[i] * 3:face[i] * 3 + 3]
-                    v3 = coord[face[i + 1] * 3:face[i + 1] * 3 + 3]
+                if len(face) >= 3:
+                    for i in range(1, len(face) - 1):
+                        v1 = coord[face[0]*3:face[0]*3+3]
+                        v2 = coord[face[i]*3:face[i]*3+3]
+                        v3 = coord[face[i+1]*3:face[i+1]*3+3]
+                        tri = v1 + v2 + v3
 
-                    tri = v1 + v2 + v3
-                    GL.triangleSet(tri, colors)
+                        # Cores
+                        if colorPerVertex:
+                            c0 = get_color_for_index(face[0])
+                            c1 = get_color_for_index(face[i])
+                            c2 = get_color_for_index(face[i+1])
+                            vertex_colors = [
+                                [int(255*c0[0]), int(255*c0[1]), int(255*c0[2])],
+                                [int(255*c1[0]), int(255*c1[1]), int(255*c1[2])],
+                                [int(255*c2[0]), int(255*c2[1]), int(255*c2[2])],
+                            ]
+                        else:
+                            c = get_color_for_index(0)
+                            vertex_colors = None
+                        # UVs: calcula os índices corretos para cada triângulo
+                        tri_indices = [0, i, i+1]
+                        uv0, uv1, uv2 = get_uv_for_triangle(poly_start_tc, tri_indices)
+                        vertex_uvs = [uv0, uv1, uv2] if uv0 and uv1 and uv2 else None
+                        # Chama triangleSet com textura
+                        GL.triangleSet(tri, colors, vertex_colors=vertex_colors, vertex_uvs=vertex_uvs, texture=current_texture)
+
+                # Atualiza poly_start_tc para o próximo polígono
+                if texCoordIndex and isinstance(texCoordIndex, (list, tuple)):
+                    poly_start_tc += len(face) + 1
                 face = []
             else:
                 face.append(idx)
+
+
     @staticmethod
     def box(size, colors):
         """Função usada para renderizar Boxes."""

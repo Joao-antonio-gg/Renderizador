@@ -238,9 +238,19 @@ class GPU:
     def load_texture(textura):
         """Método para ler textura."""
         file = os.path.join(GPU.path, textura)
-        imagem = Image.open(file).transpose(Image.TRANSPOSE)
-        matriz = np.array(imagem)
-        return matriz
+        try:
+            imagem = Image.open(file)
+            # Garante formato RGB ou RGBA
+            if imagem.mode not in ("RGB", "RGBA"):
+                if "A" in imagem.getbands():
+                    imagem = imagem.convert("RGBA")
+                else:
+                    imagem = imagem.convert("RGB")
+            matriz = np.array(imagem)
+            return matriz
+        except Exception as e:
+            print(f"[ERRO] Falha ao carregar textura: {file} - {e}")
+            return None
 
     @staticmethod
     def get_frame_buffer():

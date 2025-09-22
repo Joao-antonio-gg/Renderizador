@@ -37,62 +37,38 @@ class Renderizador:
         self.framebuffers = {}
 
     def setup(self):
-        """Configura o sistema para a renderização."""
-        # Configurando color buffers para exibição na tela
+        """Configura o sistema para a renderização com superamostragem 2x (anti-aliasing)."""
+        self.ssaa_factor = 2
+        self.ssaa_width = self.width * self.ssaa_factor
+        self.ssaa_height = self.height * self.ssaa_factor
 
-        # Cria uma (1) posição de FrameBuffer na GPU
         fbo = gpu.GPU.gen_framebuffers(1)
-
-        # Define o atributo FRONT como o FrameBuffe principal
         self.framebuffers["FRONT"] = fbo[0]
-
-        # Define que a posição criada será usada para desenho e leitura
         gpu.GPU.bind_framebuffer(gpu.GPU.FRAMEBUFFER, self.framebuffers["FRONT"])
-        # Opções:
-        # - DRAW_FRAMEBUFFER: Faz o bind só para escrever no framebuffer
-        # - READ_FRAMEBUFFER: Faz o bind só para leitura no framebuffer
-        # - FRAMEBUFFER: Faz o bind para leitura e escrita no framebuffer
 
-        # Aloca memória no FrameBuffer para um tipo e tamanho especificado de buffer
-
-        # Memória de Framebuffer para canal de cores
+        # Configura armazenamento do framebuffer para cor
         gpu.GPU.framebuffer_storage(
             self.framebuffers["FRONT"],
             gpu.GPU.COLOR_ATTACHMENT,
             gpu.GPU.RGB8,
-            self.width,
-            self.height
+            self.ssaa_width,
+            self.ssaa_height
         )
 
-        # Descomente as seguintes linhas se for usar um Framebuffer para profundidade
-        # gpu.GPU.framebuffer_storage(
-        #     self.framebuffers["FRONT"],
-        #     gpu.GPU.DEPTH_ATTACHMENT,
-        #     gpu.GPU.DEPTH_COMPONENT32F,
-        #     self.width,
-        #     self.height
-        # )
-    
-        # Opções:
-        # - COLOR_ATTACHMENT: alocações para as cores da imagem renderizada
-        # - DEPTH_ATTACHMENT: alocações para as profundidades da imagem renderizada
-        # Obs: Você pode chamar duas vezes a rotina com cada tipo de buffer.
+        # Ativa z-buffer
+        gpu.GPU.framebuffer_storage(
+            self.framebuffers["FRONT"],
+            gpu.GPU.DEPTH_ATTACHMENT,
+            gpu.GPU.DEPTH_COMPONENT32F,
+            self.ssaa_width,
+            self.ssaa_height
+        )
 
-        # Tipos de dados:
-        # - RGB8: Para canais de cores (Vermelho, Verde, Azul) 8bits cada (0-255)
-        # - RGBA8: Para canais de cores (Vermelho, Verde, Azul, Transparência) 8bits cada (0-255)
-        # - DEPTH_COMPONENT16: Para canal de Profundidade de 16bits (half-precision) (0-65535)
-        # - DEPTH_COMPONENT32F: Para canal de Profundidade de 32bits (single-precision) (float)
-
-        # Define cor que ira apagar o FrameBuffer quando clear_buffer() invocado
         gpu.GPU.clear_color([0, 0, 0])
-
-        # Define a profundidade que ira apagar o FrameBuffer quando clear_buffer() invocado
-        # Assuma 1.0 o mais afastado e -1.0 o mais próximo da camera
         gpu.GPU.clear_depth(1.0)
+        gpu.GPU.clear_buffer()
+        self.scene.viewport(width=self.ssaa_width, height=self.ssaa_height)
 
-        # Definindo tamanho do Viewport para renderização
-        self.scene.viewport(width=self.width, height=self.height)
 
     def pre(self):
         """Rotinas pré renderização."""
@@ -106,16 +82,19 @@ class Renderizador:
         # Retorna o valor do pixel no framebuffer: read_pixel(coord, mode)
 
     def pos(self):
-        """Rotinas pós renderização."""
-        # Função invocada após o processo de renderização terminar.
+        """Rotinas pós renderização: faz downsampling para anti-aliasing."""
+        import numpy as np
+        img_ssaa = gpu.GPU.get_frame_buffer()  # shape: (ssaa_height, ssaa_width, 3)
+        h, w = self.height, self.width
+        f = self.ssaa_factor
 
-        # Essa é uma chamada conveniente para manipulação de buffers
-        # ao final da renderização de um frame. Como por exemplo, executar
-        # downscaling da imagem.
+        # Downsampling vetorizado
+        img_final = img_ssaa.reshape(h, f, w, f, 3).mean(axis=(1,3)).astype(np.uint8)
 
-        # Método para a troca dos buffers (NÃO IMPLEMENTADO)
-        # Esse método será utilizado na fase de implementação de animações
+        # Atualiza corretamente: precisamos criar um novo framebuffer para leitura se estiver menor
+        gpu.GPU.frame_buffer[gpu.GPU.read_framebuffer].color = img_final
         gpu.GPU.swap_buffers()
+
 
     def mapping(self):
         """Mapeamento de funções para as rotinas de renderização."""
