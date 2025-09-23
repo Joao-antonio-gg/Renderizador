@@ -341,8 +341,8 @@ class GL:
             else:
                 L = np.array([0,0,-1])
                 light_color = np.array([255,255,255])
-                intensity = 1.0
-                ambient_intensity = 0.2
+                intensity = 5.0
+                ambient_intensity = 0.8
             for y in range(miny, maxy+1):
                 for x in range(minx, maxx+1):
                     w0, w1, w2 = barycentric_coords(x, y, v0, v1, v2)
