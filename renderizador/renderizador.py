@@ -85,13 +85,14 @@ class Renderizador:
         """Rotinas pós renderização: faz downsampling para anti-aliasing."""
         import numpy as np
         img_ssaa = gpu.GPU.get_frame_buffer()  # shape: (ssaa_height, ssaa_width, 3)
-        h, w = self.height, self.width
-        f = self.ssaa_factor
-
-        # Downsampling vetorizado
-        img_final = img_ssaa.reshape(h, f, w, f, 3).mean(axis=(1,3)).astype(np.uint8)
-
-        # Atualiza corretamente: precisamos criar um novo framebuffer para leitura se estiver menor
+        h, w, f = self.height, self.width, self.ssaa_factor
+        ssaa_h, ssaa_w = self.ssaa_height, self.ssaa_width
+        # Garante que o reshape só ocorre se o tamanho bate
+        if img_ssaa.shape[0] == ssaa_h and img_ssaa.shape[1] == ssaa_w:
+            img_final = img_ssaa.reshape(h, f, w, f, 3).mean(axis=(1,3)).astype(np.uint8)
+        else:
+            # fallback: não faz downsampling, só converte
+            img_final = img_ssaa.astype(np.uint8)
         gpu.GPU.frame_buffer[gpu.GPU.read_framebuffer].color = img_final
         gpu.GPU.swap_buffers()
 

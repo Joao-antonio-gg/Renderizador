@@ -1008,7 +1008,7 @@ class DirectionalLight(X3DLightNode):
     def __init__(self, node):
         """Parse do nó X3D."""
         super().__init__(node) # Chama construtor da classe pai
-        self.direction = SFVec3f(node, "direction", [0.0, 0.0, -1.0])
+        self.direction = SFVec3f(node, "direction", [0.0, -1.0, -1.0])
 
     def render(self):
         """Rotina de renderização."""

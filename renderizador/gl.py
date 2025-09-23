@@ -257,21 +257,27 @@ class GL:
     @staticmethod
     def triangleSet(point, colors, vertex_colors=None, vertex_uvs=None, texture=None):
         """Desenha triângulos 3D com interpolação perspectiva de cor e textura."""
+    # print removido
         w, h = GL.width, GL.height
         if not hasattr(GL, 'z_buffer'):
             GL.z_buffer = np.full((h, w), GL.far, dtype=float)
 
         def project_vertex(v):
             vec = np.array([v[0], v[1], v[2], 1.0])
+            # print removido
             if hasattr(GL, 'transform_stack') and GL.transform_stack:
                 vec = GL.transform_stack[-1] @ vec
+                # print removido
             vec = GL.view_matrix @ vec
+            # print removido
             vec = GL.projection_matrix @ vec
+            # print removido
             if vec[3] != 0:
                 vec /= vec[3]
             sx = int((vec[0]+1)*w/2)
             sy = int((1-vec[1])*h/2)
             sz = (vec[2]+1)/2
+            # print removido
             return [sx, sy, sz, 1.0/vec[3] if vec[3] != 0 else 1.0]
 
         def barycentric_coords(px, py, v0, v1, v2):
@@ -324,6 +330,19 @@ class GL:
         def fill_triangle(v0, v1, v2, c0, c1, c2, uv0, uv1, uv2):
             minx, maxx = max(0, min(v0[0], v1[0], v2[0])), min(w-1, max(v0[0], v1[0], v2[0]))
             miny, maxy = max(0, min(v0[1], v1[1], v2[1])), min(h-1, max(v0[1], v1[1], v2[1]))
+            light = GL.get_directional_light() if hasattr(GL, 'get_directional_light') else None
+            # Parâmetros de iluminação
+            if light:
+                L = np.array(light['direction'])
+                L = L / np.linalg.norm(L)
+                light_color = np.array(light['color'])*255.0 if max(light['color']) <= 1.0 else np.array(light['color'])
+                intensity = light['intensity']
+                ambient_intensity = light['ambientIntensity']
+            else:
+                L = np.array([0,0,-1])
+                light_color = np.array([255,255,255])
+                intensity = 1.0
+                ambient_intensity = 0.2
             for y in range(miny, maxy+1):
                 for x in range(minx, maxx+1):
                     w0, w1, w2 = barycentric_coords(x, y, v0, v1, v2)
@@ -336,18 +355,18 @@ class GL:
                         w0p = (w0*inv_w0) / inv_w
                         w1p = (w1*inv_w1) / inv_w
                         w2p = (w2*inv_w2) / inv_w
-                        # Interpola cor
+                        # Interpola cor base
                         if c0 is not None and c1 is not None and c2 is not None:
-                            color = [int(w0p*c0[i] + w1p*c1[i] + w2p*c2[i]) for i in range(3)]
+                            base_color = np.array([w0p*c0[i] + w1p*c1[i] + w2p*c2[i] for i in range(3)])
                         else:
-                            color = [int(c*255) for c in colors.get("emissiveColor", [1,1,1])]
+                            # Usa diffuseColor corretamente
+                            base_color = np.array([c*255 for c in colors.get("diffuseColor", [1,1,1])])
                         # Interpola UV
                         if uv0 is not None and uv1 is not None and uv2 is not None and texture is not None:
                             u = w0p*uv0[0] + w1p*uv1[0] + w2p*uv2[0]
                             v_ = w0p*uv0[1] + w1p*uv1[1] + w2p*uv2[1]
                             tex_color = sample_texture(u, v_, texture, flip_v=True, flip_u=False)
                             if tex_color is not None:
-                                # Suporte a alpha blending se RGBA
                                 if len(tex_color) == 4:
                                     alpha = tex_color[3] / 255.0
                                     if alpha < 1.0:
@@ -356,14 +375,43 @@ class GL:
                                             bg = gpu.GPU.read_pixel([x, y], gpu.GPU.RGB8)
                                         except Exception:
                                             bg = [0, 0, 0]
-                                        color = [
-                                            int(tex_color[i]*alpha + bg[i]*(1-alpha)) for i in range(3)
-                                        ]
+                                        base_color = np.array([
+                                            tex_color[i]*alpha + bg[i]*(1-alpha) for i in range(3)
+                                        ])
                                     else:
-                                        color = tex_color[:3]
+                                        base_color = np.array(tex_color[:3])
                                 else:
-                                    color = tex_color[:3]
-                        # Se não usou textura RGBA, aplica transparência do material/cor base
+                                    base_color = np.array(tex_color[:3])
+                        # Normal interpolada (aqui assume normal da face para simplicidade)
+                        v01 = np.array(v1[:3]) - np.array(v0[:3])
+                        v02 = np.array(v2[:3]) - np.array(v0[:3])
+                        N = np.cross(v01, v02)
+                        if np.linalg.norm(N) > 0:
+                            N = N / np.linalg.norm(N)
+                        else:
+                            N = np.array([0,0,1])
+                        # Garante que a normal aponte para a câmera (z negativo)
+                        if N[2] > 0:
+                            N = -N
+                        # Vetor para câmera (assume câmera em [0,0,0])
+                        P = w0p*np.array(v0[:3]) + w1p*np.array(v1[:3]) + w2p*np.array(v2[:3])
+                        V = -P / (np.linalg.norm(P)+1e-6)
+                        # Iluminação ambiente
+                        ambient = ambient_intensity * base_color
+                        # Iluminação difusa
+                        diff = max(0, np.dot(N, -L))
+                        diffuse = intensity * diff * light_color * base_color / 255.0
+                        # Iluminação especular
+                        specular = np.zeros(3)
+                        shininess = 32
+                        if diff > 0:
+                            R = 2 * np.dot(N, -L) * N + L
+                            R = R / (np.linalg.norm(R)+1e-6)
+                            spec = max(0, np.dot(R, V)) ** shininess
+                            specular = intensity * spec * light_color * 255.0
+                        color = ambient + diffuse + specular
+                        color = np.clip(color, 0, 255).astype(int)
+                        # Transparência RGBA
                         if 'transparency' in colors and colors['transparency'] > 0.0:
                             alpha = 1.0 - colors['transparency']
                             if alpha < 1.0:
@@ -751,32 +799,52 @@ class GL:
 
     @staticmethod
     def navigationInfo(headlight):
-        """Características físicas do avatar do visualizador e do modelo de visualização."""
-        # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/navigation.html#NavigationInfo
-        # O campo do headlight especifica se um navegador deve acender um luz direcional que
-        # sempre aponta na direção que o usuário está olhando. Definir este campo como TRUE
-        # faz com que o visualizador forneça sempre uma luz do ponto de vista do usuário.
-        # A luz headlight deve ser direcional, ter intensidade = 1, cor = (1 1 1),
-        # ambientIntensity = 0,0 e direção = (0 0 −1).
+        """Configura a headlight (luz da câmera) caso esteja ativada."""
+        
+        if headlight:
+            # Define a luz direcional presa à câmera
+            light = {
+                "type": "directional",
+                "ambientIntensity": 0.0,
+                "intensity": 1.0,
+                "color": [1.0, 1.0, 1.0],
+                "direction": [0.0, 0.0, -1.0]  # olhando para frente
+            }
+            return light
+        else:
+            # Sem headlight
+            return None
 
-        # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("NavigationInfo : headlight = {0}".format(headlight)) # imprime no terminal
 
     @staticmethod
-    def directionalLight(ambientIntensity, color, intensity, direction):
-        """Luz direcional ou paralela."""
-        # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/lighting.html#DirectionalLight
-        # Define uma fonte de luz direcional que ilumina ao longo de raios paralelos
-        # em um determinado vetor tridimensional. Possui os campos básicos ambientIntensity,
-        # cor, intensidade. O campo de direção especifica o vetor de direção da iluminação
-        # que emana da fonte de luz no sistema de coordenadas local. A luz é emitida ao
-        # longo de raios paralelos de uma distância infinita.
+    def directionalLight(ambientIntensity, color, intensity, direction, normal=None):
+        """Calcula a contribuição de uma luz direcional em um ponto com normal fornecida."""
 
-        # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("DirectionalLight : ambientIntensity = {0}".format(ambientIntensity))
-        print("DirectionalLight : color = {0}".format(color)) # imprime no terminal
-        print("DirectionalLight : intensity = {0}".format(intensity)) # imprime no terminal
-        print("DirectionalLight : direction = {0}".format(direction)) # imprime no terminal
+        # Normalizar direção e normal
+        L = np.array(direction, dtype=float)
+        L = L / np.linalg.norm(L)  # direção da luz
+        if normal is not None:
+            N = np.array(normal, dtype=float)
+            N = N / np.linalg.norm(N)  # normal da superfície
+        else:
+            N = np.array([0,0,1], dtype=float)
+
+        # Luz ambiente (afeta toda superfície igualmente)
+        ambient = np.array(color) * ambientIntensity
+
+        # Luz difusa (modelo de Lambert)
+        diff = max(np.dot(N, -L), 0.0)  # -L porque a luz vem na direção oposta
+        diffuse = np.array(color) * intensity * diff
+
+        # Resultado final (clamp entre 0 e 1)
+        result = ambient + diffuse
+        result = np.clip(result, 0, 1)
+
+        return result.tolist()
+
+    @staticmethod
+    def get_directional_light():
+        return getattr(GL, '_directional_light', None)
 
     @staticmethod
     def pointLight(ambientIntensity, color, intensity, location):
@@ -812,75 +880,182 @@ class GL:
 
     @staticmethod
     def timeSensor(cycleInterval, loop):
-        """Gera eventos conforme o tempo passa."""
-        # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/time.html#TimeSensor
-        # Os nós TimeSensor podem ser usados para muitas finalidades, incluindo:
-        # Condução de simulações e animações contínuas; Controlar atividades periódicas;
-        # iniciar eventos de ocorrência única, como um despertador;
-        # Se, no final de um ciclo, o valor do loop for FALSE, a execução é encerrada.
-        # Por outro lado, se o loop for TRUE no final de um ciclo, um nó dependente do
-        # tempo continua a execução no próximo ciclo. O ciclo de um nó TimeSensor dura
-        # cycleInterval segundos. O valor de cycleInterval deve ser maior que zero.
+        """Gera eventos conforme o tempo passa (fração normalizada 0..1)."""
 
-        # Deve retornar a fração de tempo passada em fraction_changed
+        if cycleInterval <= 0:
+            raise ValueError("cycleInterval deve ser maior que zero")
 
-        # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("TimeSensor : cycleInterval = {0}".format(cycleInterval)) # imprime no terminal
-        print("TimeSensor : loop = {0}".format(loop))
+        # tempo atual em segundos
+        epoch = time.time()
 
-        # Esse método já está implementado para os alunos como exemplo
-        epoch = time.time()  # time in seconds since the epoch as a floating point number.
-        fraction_changed = (epoch % cycleInterval) / cycleInterval
+        if loop:
+            # fração cíclica (sempre entre 0 e 1)
+            fraction_changed = (epoch % cycleInterval) / cycleInterval
+        else:
+            # tempo desde o início (epoch inicial fixo pode ser usado se precisar de consistência)
+            elapsed = epoch % (cycleInterval * 1000000)  # só para não crescer infinito
+            if elapsed >= cycleInterval:
+                fraction_changed = 1.0
+            else:
+                fraction_changed = elapsed / cycleInterval
 
         return fraction_changed
 
     @staticmethod
     def splinePositionInterpolator(set_fraction, key, keyValue, closed):
-        """Interpola não linearmente entre uma lista de vetores 3D."""
-        # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/interpolators.html#SplinePositionInterpolator
-        # Interpola não linearmente entre uma lista de vetores 3D. O campo keyValue possui
-        # uma lista com os valores a serem interpolados, key possui uma lista respectiva de chaves
-        # dos valores em keyValue, a fração a ser interpolada vem de set_fraction que varia de
-        # zeroa a um. O campo keyValue deve conter exatamente tantos vetores 3D quanto os
-        # quadros-chave no key. O campo closed especifica se o interpolador deve tratar a malha
-        # como fechada, com uma transições da última chave para a primeira chave. Se os keyValues
-        # na primeira e na última chave não forem idênticos, o campo closed será ignorado.
+        """Interpola não linearmente entre uma lista de vetores 3D (Catmull-Rom)."""
+        # Validações básicas
+        try:
+            set_fraction = float(set_fraction)
+        except Exception:
+            return [0.0, 0.0, 0.0]
 
-        # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("SplinePositionInterpolator : set_fraction = {0}".format(set_fraction))
-        print("SplinePositionInterpolator : key = {0}".format(key)) # imprime no terminal
-        print("SplinePositionInterpolator : keyValue = {0}".format(keyValue))
-        print("SplinePositionInterpolator : closed = {0}".format(closed))
+        if not key or len(key) < 2 or not keyValue or len(keyValue) < 2:
+            return [0.0, 0.0, 0.0]
 
-        # Abaixo está só um exemplo de como os dados podem ser calculados e transferidos
-        value_changed = [0.0, 0.0, 0.0]
-        
-        return value_changed
+        # Garantir limites
+        if set_fraction <= key[0]:
+            return list(keyValue[0])
+        if set_fraction >= key[-1]:
+            return list(keyValue[-1])
+
+        # Decide se vamos tratar como loop (closed) — só se os pontos inicial e final forem idênticos
+        loop = bool(closed) and (len(keyValue) >= 2) and (tuple(keyValue[0]) == tuple(keyValue[-1]))
+
+        # encontra intervalo i tal que key[i] <= set_fraction <= key[i+1]
+        i = 0
+        while i < len(key) - 1 and not (key[i] <= set_fraction <= key[i + 1]):
+            i += 1
+        # segurança
+        if i >= len(key) - 1:
+            return list(keyValue[-1])
+
+        # parâmetro local t em [0,1]
+        denom = (key[i + 1] - key[i])
+        t = 0.0 if denom == 0 else (set_fraction - key[i]) / denom
+
+        # pontos de controle para Catmull-Rom: p0, p1, p2, p3
+        def get_point(idx):
+            n = len(keyValue)
+            if loop:
+                return keyValue[idx % n]
+            else:
+                # clamp
+                idx_clamped = max(0, min(idx, n - 1))
+                return keyValue[idx_clamped]
+
+        p1 = get_point(i)
+        p2 = get_point(i + 1)
+        p0 = get_point(i - 1)
+        p3 = get_point(i + 2)
+
+        # Catmull-Rom spline (component-wise)
+        def catmull_rom_comp(p0c, p1c, p2c, p3c, t):
+            t2 = t * t
+            t3 = t2 * t
+            return 0.5 * (
+                (2 * p1c) +
+                (-p0c + p2c) * t +
+                (2*p0c - 5*p1c + 4*p2c - p3c) * t2 +
+                (-p0c + 3*p1c - 3*p2c + p3c) * t3
+            )
+
+        x = catmull_rom_comp(p0[0], p1[0], p2[0], p3[0], t)
+        y = catmull_rom_comp(p0[1], p1[1], p2[1], p3[1], t)
+        z = catmull_rom_comp(p0[2], p1[2], p2[2], p3[2], t)
+
+        return [float(x), float(y), float(z)]
 
     @staticmethod
     def orientationInterpolator(set_fraction, key, keyValue):
-        """Interpola entre uma lista de valores de rotação especificos."""
-        # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/interpolators.html#OrientationInterpolator
-        # Interpola rotações são absolutas no espaço do objeto e, portanto, não são cumulativas.
-        # Uma orientação representa a posição final de um objeto após a aplicação de uma rotação.
-        # Um OrientationInterpolator interpola entre duas orientações calculando o caminho mais
-        # curto na esfera unitária entre as duas orientações. A interpolação é linear em
-        # comprimento de arco ao longo deste caminho. Os resultados são indefinidos se as duas
-        # orientações forem diagonalmente opostas. O campo keyValue possui uma lista com os
-        # valores a serem interpolados, key possui uma lista respectiva de chaves
-        # dos valores em keyValue, a fração a ser interpolada vem de set_fraction que varia de
-        # zeroa a um. O campo keyValue deve conter exatamente tantas rotações 3D quanto os
-        # quadros-chave no key.
+        """Interpola rotações absolutas usando SLERP (axis-angle -> quaternion -> slerp -> axis-angle)."""
+        # Retorna [ax, ay, az, angle]
+        try:
+            set_fraction = float(set_fraction)
+        except Exception:
+            return [0.0, 0.0, 1.0, 0.0]
 
-        # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("OrientationInterpolator : set_fraction = {0}".format(set_fraction))
-        print("OrientationInterpolator : key = {0}".format(key)) # imprime no terminal
-        print("OrientationInterpolator : keyValue = {0}".format(keyValue))
+        if not key or len(key) < 2 or not keyValue or len(keyValue) < 2:
+            return [0.0, 0.0, 1.0, 0.0]
 
-        # Abaixo está só um exemplo de como os dados podem ser calculados e transferidos
-        value_changed = [0, 0, 1, 0]
+        # limites
+        if set_fraction <= key[0]:
+            return list(keyValue[0])
+        if set_fraction >= key[-1]:
+            return list(keyValue[-1])
 
-        return value_changed
+        # encontra intervalo
+        i = 0
+        while i < len(key) - 1 and not (key[i] <= set_fraction <= key[i + 1]):
+            i += 1
+        if i >= len(key) - 1:
+            return list(keyValue[-1])
+
+        denom = (key[i + 1] - key[i])
+        t = 0.0 if denom == 0 else (set_fraction - key[i]) / denom
+
+        r1 = keyValue[i]
+        r2 = keyValue[i + 1]
+
+        axis1 = [float(r1[0]), float(r1[1]), float(r1[2])]
+        angle1 = float(r1[3])
+        axis2 = [float(r2[0]), float(r2[1]), float(r2[2])]
+        angle2 = float(r2[3])
+
+        # converte axis-angle -> quaternion [x,y,z,w]
+        def axis_angle_to_quat(axis, angle):
+            ax, ay, az = axis
+            norm = math.sqrt(ax*ax + ay*ay + az*az)
+            if norm == 0.0:
+                return [0.0, 0.0, 0.0, 1.0]
+            ax, ay, az = ax / norm, ay / norm, az / norm
+            s = math.sin(angle / 2.0)
+            w = math.cos(angle / 2.0)
+            return [ax * s, ay * s, az * s, w]
+
+        # quaternion -> axis-angle
+        def quat_to_axis_angle(q):
+            x, y, z, w = q
+            # normalizar quaternion
+            mag = math.sqrt(x*x + y*y + z*z + w*w)
+            if mag == 0.0:
+                return [0.0, 0.0, 1.0, 0.0]
+            x /= mag; y /= mag; z /= mag; w /= mag
+            angle = 2.0 * math.acos(max(-1.0, min(1.0, w)))
+            s = math.sqrt(max(0.0, 1.0 - w*w))
+            if s < 1e-6:
+                # ângulo muito pequeno -> eixo arbitrário
+                return [1.0, 0.0, 0.0, 0.0]
+            return [x / s, y / s, z / s, angle]
+
+        # SLERP entre q1 e q2
+        def slerp(q1, q2, t):
+            dot = q1[0]*q2[0] + q1[1]*q2[1] + q1[2]*q2[2] + q1[3]*q2[3]
+            # se dot < 0, inverte q2 para tomar o menor arco
+            if dot < 0.0:
+                q2 = [-q2[0], -q2[1], -q2[2], -q2[3]]
+                dot = -dot
+            # se quase colinear, faz interpolação linear e normaliza
+            if dot > 0.9995:
+                res = [q1[i] + t*(q2[i] - q1[i]) for i in range(4)]
+                mag = math.sqrt(sum(c*c for c in res))
+                return [c/mag for c in res]
+            theta_0 = math.acos(max(-1.0, min(1.0, dot)))
+            theta = theta_0 * t
+            sin_theta = math.sin(theta)
+            sin_theta_0 = math.sin(theta_0)
+            s1 = math.cos(theta) - dot * sin_theta / sin_theta_0
+            s2 = sin_theta / sin_theta_0
+            return [s1 * q1[0] + s2 * q2[0],
+                    s1 * q1[1] + s2 * q2[1],
+                    s1 * q1[2] + s2 * q2[2],
+                    s1 * q1[3] + s2 * q2[3]]
+
+        q1 = axis_angle_to_quat(axis1, angle1)
+        q2 = axis_angle_to_quat(axis2, angle2)
+        q = slerp(q1, q2, t)
+        out = quat_to_axis_angle(q)
+        return [float(out[0]), float(out[1]), float(out[2]), float(out[3])]
 
     # Para o futuro (Não para versão atual do projeto.)
     def vertex_shader(self, shader):
